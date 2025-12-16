@@ -15,6 +15,7 @@ struct CameraUniform {
 struct Material {
     base_color: vec4<f32>,
     metallic_roughness: vec4<f32>,
+    alpha_cutoff_flags: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -86,8 +87,16 @@ fn fresnel_schlick(cosTheta: f32, F0: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let base_sample = textureSample(base_color_texture, material_sampler, in.tex_coords).rgb;
-    let albedo = pow(base_sample, vec3<f32>(2.2)) * material.base_color.rgb;
+    let base_sample = textureSample(base_color_texture, material_sampler, in.tex_coords);
+    let albedo = base_sample.rgb * material.base_color.rgb;
+    let alpha = base_sample.a * material.base_color.a;
+
+    if material.alpha_cutoff_flags.y >= 0.5 && material.alpha_cutoff_flags.y < 1.5 {
+        if alpha < material.alpha_cutoff_flags.x {
+            discard;
+        }
+    }
+
     let mr_sample = textureSample(metallic_roughness_texture, material_sampler, in.tex_coords).rgb;
     let metallic = clamp(mr_sample.b * material.metallic_roughness.r, 0.0, 1.0);
     let roughness = clamp(mr_sample.g * material.metallic_roughness.g, 0.04, 1.0);
@@ -200,7 +209,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var color = ambient + Lo;
     
     color = color / (color + vec3<f32>(1.0));
-    color = pow(color, vec3<f32>(1.0 / 2.2));
-    
+
+    if material.alpha_cutoff_flags.y >= 1.5 {
+        return vec4<f32>(color, alpha);
+    }
+
     return vec4<f32>(color, 1.0);
 }

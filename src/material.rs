@@ -6,6 +6,7 @@ use crate::model::{Material as ModelMaterial, Texture as ModelTexture};
 pub struct MaterialUniform {
     pub base_color: [f32; 4],
     pub metallic_roughness: [f32; 4],
+    pub alpha_cutoff_flags: [f32; 4],
 }
 
 pub struct Material {
@@ -23,9 +24,17 @@ impl Material {
         default_base_color_texture: &wgpu::Texture,
         default_metallic_roughness_texture: &wgpu::Texture,
     ) -> Self {
+        let alpha_mode = match material.alpha_mode {
+            crate::model::AlphaMode::Opaque => 0.0,
+            crate::model::AlphaMode::Mask => 1.0,
+            crate::model::AlphaMode::Blend => 2.0,
+        };
+        let double_sided = if material.double_sided { 1.0 } else { 0.0 };
+
         let uniform = MaterialUniform {
             base_color: material.base_color,
             metallic_roughness: [material.metallic, material.roughness, 0.0, 0.0],
+            alpha_cutoff_flags: [material.alpha_cutoff, alpha_mode, double_sided, 0.0],
         };
         
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -203,7 +212,12 @@ pub fn create_default_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgp
     texture
 }
 
-pub fn create_default_texture_pixel(device: &wgpu::Device, queue: &wgpu::Queue, pixel: [u8; 4]) -> wgpu::Texture {
+pub fn create_default_texture_pixel(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pixel: [u8; 4],
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Default Texture"),
         size: wgpu::Extent3d {
@@ -214,7 +228,7 @@ pub fn create_default_texture_pixel(device: &wgpu::Device, queue: &wgpu::Queue, 
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });

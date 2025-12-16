@@ -1,1 +1,17 @@
 assets/models/environment/IntelSponza/
+
+/target/
+**/*.rs.bk
+
+*.log
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+.DS_Store
+Thumbs.db
+
+.env
+.env.*

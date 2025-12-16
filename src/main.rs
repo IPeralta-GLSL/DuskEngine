@@ -28,7 +28,10 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
     window: Arc<Window>,
-    render_pipeline: wgpu::RenderPipeline,
+    render_pipeline_opaque_cull: wgpu::RenderPipeline,
+    render_pipeline_opaque_nocull: wgpu::RenderPipeline,
+    render_pipeline_alpha_cull: wgpu::RenderPipeline,
+    render_pipeline_alpha_nocull: wgpu::RenderPipeline,
     camera: Camera,
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
@@ -216,70 +219,107 @@ impl State {
                 bind_group_layouts: &[&camera_bind_group_layout, &material_bind_group_layout],
                 push_constant_ranges: &[],
             });
-        
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            cache: None,
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: std::mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
-                            shader_location: 2,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                    ],
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        });
+
+        let vertex_state = wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 0,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                        shader_location: 1,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: std::mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
+                        shader_location: 2,
+                        format: wgpu::VertexFormat::Float32x2,
+                    },
+                ],
+            }],
+            compilation_options: Default::default(),
+        };
+
+        let make_pipeline = |label: &str,
+                             blend: wgpu::BlendState,
+                             depth_write: bool,
+                             depth_compare: wgpu::CompareFunction,
+                             cull: Option<wgpu::Face>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&render_pipeline_layout),
+                cache: None,
+                vertex: vertex_state.clone(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(blend),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: cull,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: depth_write,
+                    depth_compare,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+            })
+        };
+
+        let render_pipeline_opaque_cull = make_pipeline(
+            "Render Pipeline Opaque Cull",
+            wgpu::BlendState::REPLACE,
+            true,
+            wgpu::CompareFunction::Less,
+            Some(wgpu::Face::Back),
+        );
+        let render_pipeline_opaque_nocull = make_pipeline(
+            "Render Pipeline Opaque NoCull",
+            wgpu::BlendState::REPLACE,
+            true,
+            wgpu::CompareFunction::Less,
+            None,
+        );
+        let render_pipeline_alpha_cull = make_pipeline(
+            "Render Pipeline Alpha Cull",
+            wgpu::BlendState::ALPHA_BLENDING,
+            false,
+            wgpu::CompareFunction::LessEqual,
+            Some(wgpu::Face::Back),
+        );
+        let render_pipeline_alpha_nocull = make_pipeline(
+            "Render Pipeline Alpha NoCull",
+            wgpu::BlendState::ALPHA_BLENDING,
+            false,
+            wgpu::CompareFunction::LessEqual,
+            None,
+        );
         
         let mut vertex_buffers = Vec::new();
         let mut index_buffers = Vec::new();
@@ -301,8 +341,18 @@ impl State {
             index_buffers.push(index_buffer);
         }
         
-        let default_base_color_texture = material::create_default_texture_pixel(&device, &queue, [255, 255, 255, 255]);
-        let default_metallic_roughness_texture = material::create_default_texture_pixel(&device, &queue, [0, 255, 0, 255]);
+        let default_base_color_texture = material::create_default_texture_pixel(
+            &device,
+            &queue,
+            [255, 255, 255, 255],
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let default_metallic_roughness_texture = material::create_default_texture_pixel(
+            &device,
+            &queue,
+            [0, 255, 0, 255],
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
         let materials: Vec<Material> = model
             .materials
             .iter()
@@ -343,7 +393,10 @@ impl State {
             config,
             size,
             window,
-            render_pipeline,
+            render_pipeline_opaque_cull,
+            render_pipeline_opaque_nocull,
+            render_pipeline_alpha_cull,
+            render_pipeline_alpha_nocull,
             camera,
             camera_uniform,
             camera_buffer,
@@ -479,12 +532,39 @@ impl State {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            
-            render_pass.set_pipeline(&self.render_pipeline);
+
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            
+
             for (i, mesh) in self.model.meshes.iter().enumerate() {
                 let material_index = mesh.material_index.min(self.materials.len() - 1);
+                let mat = &self.model.materials[material_index];
+                if mat.alpha_mode == model::AlphaMode::Blend {
+                    continue;
+                }
+                let pipeline = if mat.double_sided {
+                    &self.render_pipeline_opaque_nocull
+                } else {
+                    &self.render_pipeline_opaque_cull
+                };
+                render_pass.set_pipeline(pipeline);
+                render_pass.set_bind_group(1, &self.materials[material_index].bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.vertex_buffers[i].slice(..));
+                render_pass.set_index_buffer(self.index_buffers[i].slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
+            }
+
+            for (i, mesh) in self.model.meshes.iter().enumerate() {
+                let material_index = mesh.material_index.min(self.materials.len() - 1);
+                let mat = &self.model.materials[material_index];
+                if mat.alpha_mode != model::AlphaMode::Blend {
+                    continue;
+                }
+                let pipeline = if mat.double_sided {
+                    &self.render_pipeline_alpha_nocull
+                } else {
+                    &self.render_pipeline_alpha_cull
+                };
+                render_pass.set_pipeline(pipeline);
                 render_pass.set_bind_group(1, &self.materials[material_index].bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.vertex_buffers[i].slice(..));
                 render_pass.set_index_buffer(self.index_buffers[i].slice(..), wgpu::IndexFormat::Uint32);

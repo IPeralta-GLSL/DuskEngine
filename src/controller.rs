@@ -38,8 +38,8 @@ impl InputState {
                     PhysicalKey::Code(KeyCode::KeyA) => self.left = pressed,
                     PhysicalKey::Code(KeyCode::KeyD) => self.right = pressed,
                     PhysicalKey::Code(KeyCode::Space) => self.up = pressed,
-                    PhysicalKey::Code(KeyCode::ShiftLeft) | PhysicalKey::Code(KeyCode::ShiftRight) => self.down = pressed,
-                    PhysicalKey::Code(KeyCode::ControlLeft) | PhysicalKey::Code(KeyCode::ControlRight) => self.sprint = pressed,
+                    PhysicalKey::Code(KeyCode::ControlLeft) | PhysicalKey::Code(KeyCode::ControlRight) => self.down = pressed,
+                    PhysicalKey::Code(KeyCode::ShiftLeft) | PhysicalKey::Code(KeyCode::ShiftRight) => self.sprint = pressed,
                     _ => {}
                 }
                 true

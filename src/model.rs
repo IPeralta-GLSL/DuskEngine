@@ -2,6 +2,13 @@ use anyhow::{Context, Result};
 use cgmath::{InnerSpace, Matrix, Matrix3, Matrix4, SquareMatrix, Vector3, Vector4};
 use std::{fs, path::Path};
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AlphaMode {
+    Opaque,
+    Mask,
+    Blend,
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -17,6 +24,11 @@ pub struct Material {
     pub base_color_image: Option<usize>,
     pub metallic_roughness_image: Option<usize>,
     pub normal_image: Option<usize>,
+    pub alpha_mode: AlphaMode,
+    pub alpha_cutoff: f32,
+    pub double_sided: bool,
+    pub base_color_texcoord_set: u32,
+    pub metallic_roughness_texcoord_set: u32,
 }
 
 pub struct Mesh {
@@ -30,6 +42,7 @@ pub struct Texture {
     pub width: u32,
     pub height: u32,
     pub format: wgpu::TextureFormat,
+    pub has_alpha: bool,
 }
 
 pub struct Model {
@@ -70,12 +83,53 @@ impl Model {
             }
         }
 
+        fn try_read_uri(base_dir: &Path, uri: &str) -> Option<Vec<u8>> {
+            let mut candidate = uri.replace('\\', "/");
+            if candidate.contains("%20") {
+                candidate = candidate.replace("%20", " ");
+            }
+
+            let direct = base_dir.join(&candidate);
+            if let Ok(bytes) = fs::read(&direct) {
+                return Some(bytes);
+            }
+
+            let file_name = Path::new(&candidate).file_name()?.to_string_lossy().to_string();
+            let textures_dir = base_dir.join("textures");
+            let in_textures = textures_dir.join(&file_name);
+            if let Ok(bytes) = fs::read(&in_textures) {
+                return Some(bytes);
+            }
+
+            let file_name_lower = file_name.to_ascii_lowercase();
+            for dir in [base_dir, textures_dir.as_path()] {
+                if let Ok(entries) = fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if !path.is_file() {
+                            continue;
+                        }
+                        let name = match path.file_name().and_then(|s| s.to_str()) {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        if name.to_ascii_lowercase() == file_name_lower {
+                            if let Ok(bytes) = fs::read(&path) {
+                                return Some(bytes);
+                            }
+                        }
+                    }
+                }
+            }
+
+            None
+        }
+
         let mut textures: Vec<Texture> = Vec::new();
         for image in document.images() {
             let bytes_opt: Option<Vec<u8>> = match image.source() {
                 gltf::image::Source::Uri { uri, .. } => {
-                    let img_path = base_dir.join(uri);
-                    fs::read(&img_path).ok()
+                    try_read_uri(base_dir, uri)
                 }
                 gltf::image::Source::View { view, .. } => {
                     let buffer_data = &buffers[view.buffer().index()];
@@ -97,11 +151,22 @@ impl Model {
                 (vec![255u8, 255, 255, 255], 1, 1)
             };
 
+            let mut has_alpha = false;
+            if data.len() >= 4 {
+                for a in data.iter().skip(3).step_by(4) {
+                    if *a != 255 {
+                        has_alpha = true;
+                        break;
+                    }
+                }
+            }
+
             textures.push(Texture {
                 data,
                 width,
                 height,
                 format: wgpu::TextureFormat::Rgba8Unorm,
+                has_alpha,
             });
         }
 
@@ -114,9 +179,31 @@ impl Model {
             let metallic_roughness_image = pbr
                 .metallic_roughness_texture()
                 .map(|t| t.texture().source().index());
+            let base_color_texcoord_set = pbr.base_color_texture().map(|t| t.tex_coord()).unwrap_or(0);
+            let metallic_roughness_texcoord_set = pbr
+                .metallic_roughness_texture()
+                .map(|t| t.tex_coord())
+                .unwrap_or(0);
             let normal_image = material
                 .normal_texture()
                 .map(|t| t.texture().source().index());
+
+            let mut alpha_mode = match material.alpha_mode() {
+                gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
+                gltf::material::AlphaMode::Mask => AlphaMode::Mask,
+                gltf::material::AlphaMode::Blend => AlphaMode::Blend,
+            };
+
+            if alpha_mode == AlphaMode::Opaque {
+                if let Some(img_idx) = base_color_image {
+                    if textures.get(img_idx).is_some_and(|t| t.has_alpha) {
+                        alpha_mode = AlphaMode::Blend;
+                    }
+                }
+            }
+
+            let alpha_cutoff = material.alpha_cutoff().unwrap_or(0.5);
+            let double_sided = material.double_sided();
 
             materials.push(Material {
                 base_color: pbr.base_color_factor(),
@@ -125,6 +212,11 @@ impl Model {
                 base_color_image,
                 metallic_roughness_image,
                 normal_image,
+                alpha_mode,
+                alpha_cutoff,
+                double_sided,
+                base_color_texcoord_set,
+                metallic_roughness_texcoord_set,
             });
         }
 
@@ -136,7 +228,20 @@ impl Model {
                 base_color_image: None,
                 metallic_roughness_image: None,
                 normal_image: None,
+                alpha_mode: AlphaMode::Opaque,
+                alpha_cutoff: 0.5,
+                double_sided: false,
+                base_color_texcoord_set: 0,
+                metallic_roughness_texcoord_set: 0,
             });
+        }
+
+        for mat in &materials {
+            if let Some(img_idx) = mat.base_color_image {
+                if let Some(tex) = textures.get_mut(img_idx) {
+                    tex.format = wgpu::TextureFormat::Rgba8UnormSrgb;
+                }
+            }
         }
 
         let mut meshes: Vec<Mesh> = Vec::new();
@@ -162,6 +267,7 @@ impl Model {
             node: gltf::scene::Node<'a>,
             parent: Matrix4<f32>,
             buffers: &'a [Vec<u8>],
+            materials: &'a [Material],
             meshes_out: &mut Vec<Mesh>,
         ) {
             let local = mat4_from_cols(node.transform().matrix());
@@ -171,6 +277,18 @@ impl Model {
             if let Some(mesh) = node.mesh() {
                 for primitive in mesh.primitives() {
                     let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
+
+                    let material_index = primitive.material().index().unwrap_or(0);
+                    let uv_set = materials
+                        .get(material_index)
+                        .map(|m| {
+                            if m.base_color_image.is_some() {
+                                m.base_color_texcoord_set
+                            } else {
+                                m.metallic_roughness_texcoord_set
+                            }
+                        })
+                        .unwrap_or(0);
 
                     let positions: Vec<[f32; 3]> = reader
                         .read_positions()
@@ -183,7 +301,8 @@ impl Model {
                         .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
 
                     let tex_coords: Vec<[f32; 2]> = reader
-                        .read_tex_coords(0)
+                        .read_tex_coords(uv_set)
+                        .or_else(|| reader.read_tex_coords(0))
                         .map(|iter| iter.into_f32().collect())
                         .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
 
@@ -204,7 +323,6 @@ impl Model {
                         .map(|iter| iter.into_u32().collect())
                         .unwrap_or_default();
 
-                    let material_index = primitive.material().index().unwrap_or(0);
                     meshes_out.push(Mesh {
                         vertices,
                         indices,
@@ -214,12 +332,18 @@ impl Model {
             }
 
             for child in node.children() {
-                traverse(child, world, buffers, meshes_out);
+                traverse(child, world, buffers, materials, meshes_out);
             }
         }
 
         for node in scene.nodes() {
-            traverse(node, Matrix4::from_scale(1.0), &buffers, &mut meshes);
+            traverse(
+                node,
+                Matrix4::from_scale(1.0),
+                &buffers,
+                &materials,
+                &mut meshes,
+            );
         }
 
         Ok(Model {
