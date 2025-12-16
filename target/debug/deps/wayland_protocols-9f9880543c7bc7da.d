@@ -1,0 +1,10 @@
+/home/iperalta/Documents/Git/DuskEngine/target/debug/deps/libwayland_protocols-9f9880543c7bc7da.rmeta: /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/lib.rs /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/protocol_macro.rs /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/ext.rs /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/wp.rs /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/xdg.rs /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/xwayland.rs
+
+/home/iperalta/Documents/Git/DuskEngine/target/debug/deps/wayland_protocols-9f9880543c7bc7da.d: /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/lib.rs /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/protocol_macro.rs /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/ext.rs /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/wp.rs /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/xdg.rs /home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/xwayland.rs
+
+/home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/lib.rs:
+/home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/protocol_macro.rs:
+/home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/ext.rs:
+/home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/wp.rs:
+/home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/xdg.rs:
+/home/iperalta/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.9/src/xwayland.rs:

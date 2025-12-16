@@ -1,0 +1,231 @@
+use anyhow::{Context, Result};
+use cgmath::{InnerSpace, Matrix, Matrix3, Matrix4, SquareMatrix, Vector3, Vector4};
+use std::{fs, path::Path};
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub tex_coords: [f32; 2],
+}
+
+pub struct Material {
+    pub base_color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub base_color_image: Option<usize>,
+    pub metallic_roughness_image: Option<usize>,
+    pub normal_image: Option<usize>,
+}
+
+pub struct Mesh {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    pub material_index: usize,
+}
+
+pub struct Texture {
+    pub data: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub format: wgpu::TextureFormat,
+}
+
+pub struct Model {
+    pub meshes: Vec<Mesh>,
+    pub materials: Vec<Material>,
+    pub textures: Vec<Texture>,
+}
+
+impl Model {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+        let gltf = match path.extension().and_then(|s| s.to_str()) {
+            Some(ext) if ext.eq_ignore_ascii_case("glb") => {
+                let bytes = fs::read(path).with_context(|| format!("read GLB: {}", path.display()))?;
+                gltf::Gltf::from_slice(&bytes).with_context(|| format!("parse GLB: {}", path.display()))?
+            }
+            _ => gltf::Gltf::open(path).with_context(|| format!("open glTF: {}", path.display()))?,
+        };
+        let document = gltf.document;
+
+        let mut buffers: Vec<Vec<u8>> = Vec::new();
+        for buffer in document.buffers() {
+            match buffer.source() {
+                gltf::buffer::Source::Uri(uri) => {
+                    let buf_path = base_dir.join(uri);
+                    let data = fs::read(&buf_path).with_context(|| format!("read buffer: {}", buf_path.display()))?;
+                    buffers.push(data);
+                }
+                gltf::buffer::Source::Bin => {
+                    let blob = gltf
+                        .blob
+                        .as_ref()
+                        .context("missing .blob for BIN buffer")?;
+                    buffers.push(blob.clone());
+                }
+            }
+        }
+
+        let mut textures: Vec<Texture> = Vec::new();
+        for image in document.images() {
+            let bytes_opt: Option<Vec<u8>> = match image.source() {
+                gltf::image::Source::Uri { uri, .. } => {
+                    let img_path = base_dir.join(uri);
+                    fs::read(&img_path).ok()
+                }
+                gltf::image::Source::View { view, .. } => {
+                    let buffer_data = &buffers[view.buffer().index()];
+                    let start = view.offset();
+                    let end = start + view.length();
+                    Some(buffer_data[start..end].to_vec())
+                }
+            };
+
+            let (data, width, height) = if let Some(bytes) = bytes_opt {
+                if let Ok(img) = image::load_from_memory(&bytes) {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    (rgba.into_raw(), w, h)
+                } else {
+                    (vec![255u8, 255, 255, 255], 1, 1)
+                }
+            } else {
+                (vec![255u8, 255, 255, 255], 1, 1)
+            };
+
+            textures.push(Texture {
+                data,
+                width,
+                height,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+            });
+        }
+
+        let mut materials = Vec::new();
+        for material in document.materials() {
+            let pbr = material.pbr_metallic_roughness();
+            let base_color_image = pbr
+                .base_color_texture()
+                .map(|t| t.texture().source().index());
+            let metallic_roughness_image = pbr
+                .metallic_roughness_texture()
+                .map(|t| t.texture().source().index());
+            let normal_image = material
+                .normal_texture()
+                .map(|t| t.texture().source().index());
+
+            materials.push(Material {
+                base_color: pbr.base_color_factor(),
+                metallic: pbr.metallic_factor(),
+                roughness: pbr.roughness_factor(),
+                base_color_image,
+                metallic_roughness_image,
+                normal_image,
+            });
+        }
+
+        if materials.is_empty() {
+            materials.push(Material {
+                base_color: [1.0, 1.0, 1.0, 1.0],
+                metallic: 0.0,
+                roughness: 0.5,
+                base_color_image: None,
+                metallic_roughness_image: None,
+                normal_image: None,
+            });
+        }
+
+        let mut meshes: Vec<Mesh> = Vec::new();
+        let scene = document
+            .default_scene()
+            .or_else(|| document.scenes().next())
+            .context("glTF has no scene")?;
+
+        fn mat4_from_cols(cols: [[f32; 4]; 4]) -> Matrix4<f32> {
+            Matrix4::from(cols)
+        }
+
+        fn normal_matrix(m: Matrix4<f32>) -> Matrix3<f32> {
+            let a = Matrix3::new(
+                m.x.x, m.x.y, m.x.z,
+                m.y.x, m.y.y, m.y.z,
+                m.z.x, m.z.y, m.z.z,
+            );
+            a.invert().unwrap_or(Matrix3::from_scale(1.0)).transpose()
+        }
+
+        fn traverse<'a>(
+            node: gltf::scene::Node<'a>,
+            parent: Matrix4<f32>,
+            buffers: &'a [Vec<u8>],
+            meshes_out: &mut Vec<Mesh>,
+        ) {
+            let local = mat4_from_cols(node.transform().matrix());
+            let world = parent * local;
+            let nmat = normal_matrix(world);
+
+            if let Some(mesh) = node.mesh() {
+                for primitive in mesh.primitives() {
+                    let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
+
+                    let positions: Vec<[f32; 3]> = reader
+                        .read_positions()
+                        .map(|iter| iter.collect())
+                        .unwrap_or_default();
+
+                    let normals: Vec<[f32; 3]> = reader
+                        .read_normals()
+                        .map(|iter| iter.collect())
+                        .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
+
+                    let tex_coords: Vec<[f32; 2]> = reader
+                        .read_tex_coords(0)
+                        .map(|iter| iter.into_f32().collect())
+                        .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+
+                    let mut vertices: Vec<Vertex> = Vec::with_capacity(positions.len());
+                    for ((pos, norm), uv) in positions.iter().zip(normals.iter()).zip(tex_coords.iter()) {
+                        let wp = world * Vector4::new(pos[0], pos[1], pos[2], 1.0);
+                        let nn = nmat * Vector3::new(norm[0], norm[1], norm[2]);
+                        let nn = nn.normalize();
+                        vertices.push(Vertex {
+                            position: [wp.x, wp.y, wp.z],
+                            normal: [nn.x, nn.y, nn.z],
+                            tex_coords: *uv,
+                        });
+                    }
+
+                    let indices: Vec<u32> = reader
+                        .read_indices()
+                        .map(|iter| iter.into_u32().collect())
+                        .unwrap_or_default();
+
+                    let material_index = primitive.material().index().unwrap_or(0);
+                    meshes_out.push(Mesh {
+                        vertices,
+                        indices,
+                        material_index,
+                    });
+                }
+            }
+
+            for child in node.children() {
+                traverse(child, world, buffers, meshes_out);
+            }
+        }
+
+        for node in scene.nodes() {
+            traverse(node, Matrix4::from_scale(1.0), &buffers, &mut meshes);
+        }
+
+        Ok(Model {
+            meshes,
+            materials,
+            textures,
+        })
+    }
+}
