@@ -3,7 +3,7 @@ struct VertexOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) tex_coords: vec2<f32>,
-    @location(3) light_clip: vec4<f32>,
+    @location(3) view_depth: f32,
 };
 
 struct SkyOut {
@@ -19,6 +19,10 @@ struct CameraUniform {
     light_view_proj: mat4x4<f32>,
     light_dir: vec4<f32>,
     env_intensity: vec4<f32>,
+    cascade_splits: vec4<f32>,
+    light_view_proj_cascade1: mat4x4<f32>,
+    light_view_proj_cascade2: mat4x4<f32>,
+    light_view_proj_cascade3: mat4x4<f32>,
 };
 
 struct Material {
@@ -31,7 +35,7 @@ struct Material {
 var<uniform> camera: CameraUniform;
 
 @group(0) @binding(1)
-var shadow_map: texture_depth_2d;
+var shadow_map: texture_depth_2d_array;
 
 @group(0) @binding(2)
 var shadow_sampler: sampler_comparison;
@@ -55,6 +59,94 @@ var metallic_roughness_texture: texture_2d<f32>;
 var material_sampler: sampler;
 
 const PI: f32 = 3.14159265359;
+const SHADOW_MAP_SIZE: f32 = 4096.0;
+
+const POISSON_DISK: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+    vec2<f32>(-0.94201624, -0.39906216),
+    vec2<f32>(0.94558609, -0.76890725),
+    vec2<f32>(-0.094184101, -0.92938870),
+    vec2<f32>(0.34495938, 0.29387760),
+    vec2<f32>(-0.91588581, 0.45771432),
+    vec2<f32>(-0.81544232, -0.87912464),
+    vec2<f32>(-0.38277543, 0.27676845),
+    vec2<f32>(0.97484398, 0.75648379),
+    vec2<f32>(0.44323325, -0.97511554),
+    vec2<f32>(0.53742981, -0.47373420),
+    vec2<f32>(-0.26496911, -0.41893023),
+    vec2<f32>(0.79197514, 0.19090188),
+    vec2<f32>(-0.24188840, 0.99706507),
+    vec2<f32>(-0.81409955, 0.91437590),
+    vec2<f32>(0.19984126, 0.78641367),
+    vec2<f32>(0.14383161, -0.14100790)
+);
+
+fn select_cascade(view_depth: f32) -> i32 {
+    if view_depth < camera.cascade_splits.x {
+        return 0;
+    } else if view_depth < camera.cascade_splits.y {
+        return 1;
+    } else if view_depth < camera.cascade_splits.z {
+        return 2;
+    }
+    return 3;
+}
+
+fn get_light_view_proj(cascade: i32) -> mat4x4<f32> {
+    if cascade == 0 {
+        return camera.light_view_proj;
+    } else if cascade == 1 {
+        return camera.light_view_proj_cascade1;
+    } else if cascade == 2 {
+        return camera.light_view_proj_cascade2;
+    }
+    return camera.light_view_proj_cascade3;
+}
+
+fn shadow_pcf_cascade(world_pos: vec3<f32>, N: vec3<f32>, L: vec3<f32>, cascade: i32) -> f32 {
+    let light_vp = get_light_view_proj(cascade);
+    
+    let NdotL = max(dot(N, L), 0.0);
+    let slope_bias = 0.0002 * sqrt(1.0 - NdotL * NdotL) / max(NdotL, 0.001);
+    let normal_offset = 0.004 * (1.0 - NdotL);
+    let offset_pos = world_pos + N * normal_offset;
+    
+    let light_clip = light_vp * vec4<f32>(offset_pos, 1.0);
+    
+    if light_clip.w <= 0.0 {
+        return 1.0;
+    }
+    
+    let ndc = light_clip.xyz / light_clip.w;
+    let uv = ndc.xy * 0.5 + vec2<f32>(0.5, 0.5);
+    
+    if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+        return 1.0;
+    }
+    
+    let depth = ndc.z - slope_bias;
+    
+    let texel_size = 1.2 / SHADOW_MAP_SIZE;
+    var shadow_sum = 0.0;
+    
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[0] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[1] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[2] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[3] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[4] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[5] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[6] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[7] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[8] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[9] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[10] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[11] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[12] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[13] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[14] * texel_size, cascade, depth);
+    shadow_sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + POISSON_DISK[15] * texel_size, cascade, depth);
+    
+    return shadow_sum / 16.0;
+}
 
 @vertex
 fn vs_main(
@@ -66,8 +158,10 @@ fn vs_main(
     out.world_position = position;
     out.normal = normal;
     out.tex_coords = tex_coords;
-    out.clip_position = camera.view_proj * vec4<f32>(position, 1.0);
-    out.light_clip = camera.light_view_proj * vec4<f32>(position, 1.0);
+    let clip_pos = camera.view_proj * vec4<f32>(position, 1.0);
+    out.clip_position = clip_pos;
+    let forward_ws = normalize((camera.view_inv * vec4<f32>(0.0, 0.0, -1.0, 0.0)).xyz);
+    out.view_depth = max(0.0, dot(position - camera.position.xyz, forward_ws));
     return out;
 }
 
@@ -82,7 +176,6 @@ fn vs_shadow(
 
 @vertex
 fn vs_sky(@builtin(vertex_index) vid: u32) -> SkyOut {
-    // Fullscreen triangle.
     var p = array<vec2<f32>, 3>(
         vec2<f32>(-1.0, -3.0),
         vec2<f32>( 3.0,  1.0),
@@ -91,7 +184,6 @@ fn vs_sky(@builtin(vertex_index) vid: u32) -> SkyOut {
 
     let clip = vec4<f32>(p[vid], 1.0, 1.0);
 
-    // Reconstruct view ray from clip space.
     let view_h = camera.proj_inv * clip;
     let view_dir = normalize(view_h.xyz / view_h.w);
     let world_dir = normalize((camera.view_inv * vec4<f32>(view_dir, 0.0)).xyz);
@@ -107,28 +199,6 @@ fn dir_to_equirect_uv(dir: vec3<f32>) -> vec2<f32> {
     let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5;
     let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
     return vec2<f32>(u, v);
-}
-
-fn shadow_pcf(light_clip: vec4<f32>, depth_bias: f32) -> f32 {
-    if light_clip.w <= 0.0 {
-        return 1.0;
-    }
-    let ndc = light_clip.xyz / light_clip.w;
-    let uv = ndc.xy * 0.5 + vec2<f32>(0.5, 0.5);
-    if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
-        return 1.0;
-    }
-    let depth = ndc.z;
-    // Smaller kernel reduces shadow bleeding/light leaks through thin geometry.
-    let texel = 1.0 / vec2<f32>(2048.0, 2048.0);
-    var sum = 0.0;
-    for (var y: i32 = -1; y <= 1; y = y + 1) {
-        for (var x: i32 = -1; x <= 1; x = x + 1) {
-            let o = vec2<f32>(f32(x), f32(y)) * texel;
-            sum = sum + textureSampleCompare(shadow_map, shadow_sampler, uv + o, depth - depth_bias);
-        }
-    }
-    return sum / 9.0;
 }
 
 fn distribution_ggx(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
@@ -185,18 +255,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     let N = normalize(in.normal);
     let V = normalize(camera.position.xyz - in.world_position);
+    let L = normalize(-camera.light_dir.xyz);
 
-    let ndotl = max(dot(N, normalize(-camera.light_dir.xyz)), 0.0);
-    // Conservative receiver bias to reduce light leaking/peter-panning.
-    let bias = max(0.00008, 0.0012 * (1.0 - ndotl));
-    let shadow = shadow_pcf(in.light_clip, bias);
+    let cascade = select_cascade(in.view_depth);
+    let shadow = shadow_pcf_cascade(in.world_position, N, L, cascade);
     
     var F0 = vec3<f32>(0.04);
     F0 = mix(F0, albedo, metallic);
     
     var Lo = vec3<f32>(0.0);
 
-    let L = normalize(-camera.light_dir.xyz);
     let H = normalize(V + L);
     let radiance = vec3<f32>(6.0, 6.0, 6.0);
 

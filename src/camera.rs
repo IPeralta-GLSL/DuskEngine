@@ -105,6 +105,10 @@ pub struct CameraUniform {
     pub light_view_proj: [[f32; 4]; 4],
     pub light_dir: [f32; 4],
     pub env_intensity: [f32; 4],
+    pub cascade_splits: [f32; 4],
+    pub light_view_proj_cascade1: [[f32; 4]; 4],
+    pub light_view_proj_cascade2: [[f32; 4]; 4],
+    pub light_view_proj_cascade3: [[f32; 4]; 4],
 }
 
 impl CameraUniform {
@@ -116,7 +120,11 @@ impl CameraUniform {
             position: [0.0, 0.0, 0.0, 1.0],
             light_view_proj: Matrix4::from_scale(1.0).into(),
             light_dir: [0.0, -1.0, 0.0, 0.0],
-            env_intensity: [0.15, 0.15, 0.15, 0.0],
+            env_intensity: [1.0, 1.0, 1.0, 0.0],
+            cascade_splits: [0.0, 0.0, 0.0, 0.0],
+            light_view_proj_cascade1: Matrix4::from_scale(1.0).into(),
+            light_view_proj_cascade2: Matrix4::from_scale(1.0).into(),
+            light_view_proj_cascade3: Matrix4::from_scale(1.0).into(),
         }
     }
 
@@ -135,5 +143,33 @@ impl CameraUniform {
         self.light_view_proj = light_view_proj.into();
         self.light_dir = [light_dir.x, light_dir.y, light_dir.z, 0.0];
         self.env_intensity = [env_intensity, env_intensity, env_intensity, 0.0];
+    }
+
+    pub fn update_with_cascades(
+        &mut self, 
+        camera: &Camera, 
+        light_view_projs: [Matrix4<f32>; 4],
+        cascade_splits: [f32; 4],
+        light_dir: Vector3<f32>, 
+        env_intensity: f32
+    ) {
+        use cgmath::SquareMatrix;
+        
+        let view = camera.view_matrix();
+        let proj = camera.projection_matrix();
+        let view_proj = opengl_to_wgpu_matrix() * proj * view;
+        let proj_wgpu = opengl_to_wgpu_matrix() * proj;
+        
+        self.view_proj = view_proj.into();
+        self.view_inv = view.invert().unwrap().into();
+        self.proj_inv = proj_wgpu.invert().unwrap().into();
+        self.position = [camera.position.x, camera.position.y, camera.position.z, 1.0];
+        self.light_view_proj = light_view_projs[0].into();
+        self.light_view_proj_cascade1 = light_view_projs[1].into();
+        self.light_view_proj_cascade2 = light_view_projs[2].into();
+        self.light_view_proj_cascade3 = light_view_projs[3].into();
+        self.light_dir = [light_dir.x, light_dir.y, light_dir.z, 0.0];
+        self.env_intensity = [env_intensity, env_intensity, env_intensity, 0.0];
+        self.cascade_splits = cascade_splits;
     }
 }

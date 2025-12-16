@@ -105,7 +105,6 @@ impl Model {
                 roots.push(p);
             }
 
-            // 1) Try the full URI path relative to common roots.
             for root in &roots {
                 let direct = root.join(&candidate);
                 if let Ok(bytes) = fs::read(&direct) {
@@ -113,7 +112,6 @@ impl Model {
                 }
             }
 
-            // 2) Try common texture folders (both casing variants), with full URI.
             for root in &roots {
                 for folder in ["textures", "Textures"] {
                     let direct = root.join(folder).join(&candidate);
@@ -123,7 +121,6 @@ impl Model {
                 }
             }
 
-            // 3) Fall back to filename-only search inside common texture folders.
             let file_name = Path::new(&candidate).file_name()?.to_string_lossy().to_string();
             for root in &roots {
                 for folder in ["textures", "Textures"] {
@@ -264,8 +261,6 @@ impl Model {
             let mut metallic = pbr.metallic_factor();
             let mut roughness = pbr.roughness_factor();
 
-            // Heuristic for assets converted from specular workflow (often no MR texture):
-            // push roughness up and metallic down to avoid overly glossy/plastic look.
             if metallic_roughness_image.is_none() {
                 metallic = 0.0;
                 roughness = roughness.max(0.85);

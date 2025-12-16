@@ -119,7 +119,7 @@ fn compute_light_view_proj(light_dir: Vector3<f32>, scene_min: Point3<f32>, scen
     let center_x = (min_ls.x + max_ls.x) * 0.5;
     let center_y = (min_ls.y + max_ls.y) * 0.5;
 
-    let shadow_res = 2048.0;
+    let shadow_res = 4096.0;
     let texel = (2.0 * half_size) / shadow_res;
     let snapped_x = (center_x / texel).floor() * texel;
     let snapped_y = (center_y / texel).floor() * texel;
@@ -134,6 +134,80 @@ fn compute_light_view_proj(light_dir: Vector3<f32>, scene_min: Point3<f32>, scen
     let far_z = (-min_ls.z + z_margin).max(near_z + 0.1);
 
     let light_proj = cgmath::ortho(left, right_o, bottom, top, near_z, far_z);
+    opengl_to_wgpu_matrix() * light_proj * light_view
+}
+
+fn compute_cascade_view_proj(
+    light_dir: Vector3<f32>,
+    camera: &Camera,
+    near: f32,
+    far: f32,
+    scene_min: Point3<f32>,
+    scene_max: Point3<f32>,
+) -> cgmath::Matrix4<f32> {
+    use cgmath::Matrix4;
+
+    let up_l = if light_dir.y.abs() > 0.95 {
+        Vector3::new(0.0, 0.0, 1.0)
+    } else {
+        Vector3::new(0.0, 1.0, 0.0)
+    };
+
+    let forward = camera.forward();
+    let center = camera.position + forward * ((near + far) * 0.5);
+    let center = Point3::new(center.x, center.y, center.z);
+
+    let tan_half_v = (camera.fovy.to_radians() * 0.5).tan();
+    let tan_half_h = tan_half_v * camera.aspect;
+
+    let far_half_h = far * tan_half_h;
+    let far_half_v = far * tan_half_v;
+    let near_half_h = near * tan_half_h;
+    let near_half_v = near * tan_half_v;
+
+    let far_radius = (far * far + far_half_h * far_half_h + far_half_v * far_half_v).sqrt();
+    let near_radius = (near * near + near_half_h * near_half_h + near_half_v * near_half_v).sqrt();
+    let mut radius = far_radius.max(near_radius);
+
+    let shadow_res = 4096.0;
+    let texel = (2.0 * radius) / shadow_res;
+    radius = (radius / texel).ceil() * texel;
+
+    let light_pos = center - light_dir * (radius * 4.0 + 200.0);
+    let light_view = Matrix4::look_at_rh(light_pos, center, up_l);
+
+    let center_ls = light_view * cgmath::Vector4::new(center.x, center.y, center.z, 1.0);
+    let snapped_x = (center_ls.x / texel).round() * texel;
+    let snapped_y = (center_ls.y / texel).round() * texel;
+
+    let min_x = snapped_x - radius;
+    let max_x = snapped_x + radius;
+    let min_y = snapped_y - radius;
+    let max_y = snapped_y + radius;
+
+    let scene_corners = [
+        Point3::new(scene_min.x, scene_min.y, scene_min.z),
+        Point3::new(scene_min.x, scene_min.y, scene_max.z),
+        Point3::new(scene_min.x, scene_max.y, scene_min.z),
+        Point3::new(scene_min.x, scene_max.y, scene_max.z),
+        Point3::new(scene_max.x, scene_min.y, scene_min.z),
+        Point3::new(scene_max.x, scene_min.y, scene_max.z),
+        Point3::new(scene_max.x, scene_max.y, scene_min.z),
+        Point3::new(scene_max.x, scene_max.y, scene_max.z),
+    ];
+
+    let mut min_z = f32::INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+    for p in &scene_corners {
+        let lp = light_view * cgmath::Vector4::new(p.x, p.y, p.z, 1.0);
+        min_z = min_z.min(lp.z);
+        max_z = max_z.max(lp.z);
+    }
+    let margin_z = radius * 2.0 + 200.0;
+    min_z -= margin_z;
+    max_z += margin_z;
+
+    let light_proj = cgmath::ortho(min_x, max_x, min_y, max_y, -max_z, -min_z);
     opengl_to_wgpu_matrix() * light_proj * light_view
 }
 
@@ -167,7 +241,8 @@ struct State {
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    shadow_camera_bind_group: wgpu::BindGroup,
+    shadow_camera_buffers: [wgpu::Buffer; 4],
+    shadow_camera_bind_groups: [wgpu::BindGroup; 4],
     input: InputState,
     last_frame: Instant,
     meshes: Vec<SceneMesh>,
@@ -257,7 +332,6 @@ impl State {
         for path in &model_paths {
             let mut m = Model::load(path)?;
 
-            // Compute model bounds.
             let mut min = Point3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
             let mut max = Point3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
             for mesh in &m.meshes {
@@ -272,7 +346,6 @@ impl State {
             }
             let width = (max.x - min.x).max(1.0);
 
-            // Apply offset so multiple models can coexist without overlapping.
             if offset_x != 0.0 {
                 for mesh in &mut m.meshes {
                     for v in &mut mesh.vertices {
@@ -314,11 +387,10 @@ impl State {
         
         let mut camera_uniform = CameraUniform::new();
 
-        // Midday sun: straight down.
         let light_dir = Vector3::new(0.0f32, -1.0f32, 0.0f32);
         let light_view_proj = compute_light_view_proj(light_dir, scene_min, scene_max);
 
-        camera_uniform.update(&camera, light_view_proj, light_dir, 0.18);
+        camera_uniform.update(&camera, light_view_proj, light_dir, 1.0);
         
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
@@ -359,7 +431,7 @@ impl State {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
                             sample_type: wgpu::TextureSampleType::Depth,
                         },
                         count: None,
@@ -391,11 +463,11 @@ impl State {
             });
         
         let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Shadow Texture"),
+            label: Some("Shadow Texture Array"),
             size: wgpu::Extent3d {
-                width: 2048,
-                height: 2048,
-                depth_or_array_layers: 1,
+                width: 4096,
+                height: 4096,
+                depth_or_array_layers: 4,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -404,7 +476,16 @@ impl State {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let shadow_texture_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_texture_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Shadow Texture View"),
+            format: Some(wgpu::TextureFormat::Depth32Float),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            aspect: wgpu::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: Some(4),
+        });
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -516,13 +597,25 @@ impl State {
             (texture, view, sampler)
         };
 
-        let shadow_camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &shadow_camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-            label: Some("shadow_camera_bind_group"),
+        let shadow_camera_buffers: [wgpu::Buffer; 4] = std::array::from_fn(|i| {
+            let mut u = camera_uniform;
+            u.light_view_proj = light_view_proj.into();
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("Shadow Camera Buffer {}", i)),
+                contents: bytemuck::cast_slice(&[u]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            })
+        });
+
+        let shadow_camera_bind_groups: [wgpu::BindGroup; 4] = std::array::from_fn(|i| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &shadow_camera_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: shadow_camera_buffers[i].as_entire_binding(),
+                }],
+                label: Some(&format!("shadow_camera_bind_group {}", i)),
+            })
         });
 
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -755,7 +848,6 @@ impl State {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                // Cast shadows from both sides to avoid light leaking through single-sided meshes.
                 cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
@@ -767,7 +859,6 @@ impl State {
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState {
-                    // Keep raster depth bias conservative; most bias is handled per-fragment.
                     constant: 1,
                     slope_scale: 1.0,
                     clamp: 0.0,
@@ -915,7 +1006,8 @@ impl State {
             camera_uniform,
             camera_buffer,
             camera_bind_group,
-            shadow_camera_bind_group,
+            shadow_camera_buffers,
+            shadow_camera_bind_groups,
             input: InputState::new(),
             last_frame: Instant::now(),
             meshes,
@@ -1011,14 +1103,71 @@ impl State {
         let speed = if self.input.sprint { 18.0 } else { 6.0 };
         self.camera.move_fly(wish, dt, speed);
 
+        let cascade_splits = [
+            self.camera.znear + 0.05 * (self.camera.zfar - self.camera.znear),
+            self.camera.znear + 0.15 * (self.camera.zfar - self.camera.znear),
+            self.camera.znear + 0.40 * (self.camera.zfar - self.camera.znear),
+            self.camera.zfar,
+        ];
+
+        let light_view_projs = [
+            compute_cascade_view_proj(
+                self.light_dir,
+                &self.camera,
+                self.camera.znear,
+                cascade_splits[0],
+                self.scene_min,
+                self.scene_max,
+            ),
+            compute_cascade_view_proj(
+                self.light_dir,
+                &self.camera,
+                cascade_splits[0],
+                cascade_splits[1],
+                self.scene_min,
+                self.scene_max,
+            ),
+            compute_cascade_view_proj(
+                self.light_dir,
+                &self.camera,
+                cascade_splits[1],
+                cascade_splits[2],
+                self.scene_min,
+                self.scene_max,
+            ),
+            compute_cascade_view_proj(
+                self.light_dir,
+                &self.camera,
+                cascade_splits[2],
+                cascade_splits[3],
+                self.scene_min,
+                self.scene_max,
+            ),
+        ];
+
         let env_intensity = self.camera_uniform.env_intensity[0];
-        self.camera_uniform
-            .update(&self.camera, self.light_view_proj, self.light_dir, env_intensity);
+        self.camera_uniform.update_with_cascades(
+            &self.camera,
+            light_view_projs,
+            cascade_splits,
+            self.light_dir,
+            env_intensity,
+        );
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
+
+        for i in 0..4 {
+            let mut u = self.camera_uniform;
+            u.light_view_proj = light_view_projs[i].into();
+            self.queue.write_buffer(
+                &self.shadow_camera_buffers[i],
+                0,
+                bytemuck::cast_slice(&[u]),
+            );
+        }
     }
     
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -1033,12 +1182,23 @@ impl State {
                 label: Some("Render Encoder"),
             });
 
-        {
+        for cascade in 0..4 {
+            let shadow_layer_view = self.shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("Shadow Layer {}", cascade)),
+                format: Some(wgpu::TextureFormat::Depth32Float),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                aspect: wgpu::TextureAspect::All,
+                base_mip_level: 0,
+                mip_level_count: None,
+                base_array_layer: cascade,
+                array_layer_count: Some(1),
+            });
+
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Shadow Pass"),
+                label: Some(&format!("Shadow Pass Cascade {}", cascade)),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_texture_view,
+                    view: &shadow_layer_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -1050,7 +1210,7 @@ impl State {
             });
 
             shadow_pass.set_pipeline(&self.shadow_pipeline);
-            shadow_pass.set_bind_group(0, &self.shadow_camera_bind_group, &[]);
+            shadow_pass.set_bind_group(0, &self.shadow_camera_bind_groups[cascade as usize], &[]);
             for mesh in &self.meshes {
                 shadow_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 shadow_pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -1088,7 +1248,6 @@ impl State {
 
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            // HDR background.
             render_pass.set_pipeline(&self.sky_pipeline);
             render_pass.draw(0..3, 0..1);
 
