@@ -161,6 +161,7 @@ struct State {
     render_pipeline_opaque_nocull: wgpu::RenderPipeline,
     render_pipeline_alpha_cull: wgpu::RenderPipeline,
     render_pipeline_alpha_nocull: wgpu::RenderPipeline,
+    sky_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
     camera: Camera,
     camera_uniform: CameraUniform,
@@ -612,6 +613,12 @@ impl State {
             push_constant_ranges: &[],
         });
 
+        let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Sky Pipeline Layout"),
+            bind_group_layouts: &[&camera_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
         let vertex_state = wgpu::VertexState {
             module: &shader,
             entry_point: "vs_main",
@@ -774,6 +781,50 @@ impl State {
             multiview: None,
         });
 
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Sky Pipeline"),
+            layout: Some(&sky_pipeline_layout),
+            cache: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_sky",
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_sky",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
         let default_base_color_texture = material::create_default_texture_pixel(
             &device,
             &queue,
@@ -858,6 +909,7 @@ impl State {
             render_pipeline_opaque_nocull,
             render_pipeline_alpha_cull,
             render_pipeline_alpha_nocull,
+            sky_pipeline,
             shadow_pipeline,
             camera,
             camera_uniform,
@@ -1035,6 +1087,10 @@ impl State {
             });
 
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+
+            // HDR background.
+            render_pass.set_pipeline(&self.sky_pipeline);
+            render_pass.draw(0..3, 0..1);
 
             for mesh in &self.meshes {
                 let material_index = mesh.material_index.min(self.materials.len().saturating_sub(1));

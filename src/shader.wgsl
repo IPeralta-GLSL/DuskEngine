@@ -6,6 +6,11 @@ struct VertexOutput {
     @location(3) light_clip: vec4<f32>,
 };
 
+struct SkyOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) dir: vec3<f32>,
+};
+
 struct CameraUniform {
     view_proj: mat4x4<f32>,
     view_inv: mat4x4<f32>,
@@ -73,6 +78,28 @@ fn vs_shadow(
     @location(2) tex_coords: vec2<f32>,
 ) -> @builtin(position) vec4<f32> {
     return camera.light_view_proj * vec4<f32>(position, 1.0);
+}
+
+@vertex
+fn vs_sky(@builtin(vertex_index) vid: u32) -> SkyOut {
+    // Fullscreen triangle.
+    var p = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -3.0),
+        vec2<f32>( 3.0,  1.0),
+        vec2<f32>(-1.0,  1.0),
+    );
+
+    let clip = vec4<f32>(p[vid], 1.0, 1.0);
+
+    // Reconstruct view ray from clip space.
+    let view_h = camera.proj_inv * clip;
+    let view_dir = normalize(view_h.xyz / view_h.w);
+    let world_dir = normalize((camera.view_inv * vec4<f32>(view_dir, 0.0)).xyz);
+
+    var o: SkyOut;
+    o.pos = vec4<f32>(p[vid], 1.0, 1.0);
+    o.dir = world_dir;
+    return o;
 }
 
 fn dir_to_equirect_uv(dir: vec3<f32>) -> vec2<f32> {
@@ -200,4 +227,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     return vec4<f32>(color, 1.0);
+}
+
+@fragment
+fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
+    let uv = dir_to_equirect_uv(in.dir);
+    var col = textureSample(env_map, env_sampler, uv).rgb * camera.env_intensity.rgb;
+    col = col / (col + vec3<f32>(1.0));
+    return vec4<f32>(col, 1.0);
 }

@@ -261,10 +261,20 @@ impl Model {
             let alpha_cutoff = material.alpha_cutoff().unwrap_or(0.5);
             let double_sided = material.double_sided();
 
+            let mut metallic = pbr.metallic_factor();
+            let mut roughness = pbr.roughness_factor();
+
+            // Heuristic for assets converted from specular workflow (often no MR texture):
+            // push roughness up and metallic down to avoid overly glossy/plastic look.
+            if metallic_roughness_image.is_none() {
+                metallic = 0.0;
+                roughness = roughness.max(0.85);
+            }
+
             materials.push(Material {
                 base_color: pbr.base_color_factor(),
-                metallic: pbr.metallic_factor(),
-                roughness: pbr.roughness_factor(),
+                metallic,
+                roughness,
                 base_color_image,
                 metallic_roughness_image,
                 normal_image,
