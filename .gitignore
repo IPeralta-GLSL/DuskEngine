@@ -1,5 +1,5 @@
 assets/models/environment/IntelSponza/
-
+assets/models/environment/
 /target/
 **/*.rs.bk
 

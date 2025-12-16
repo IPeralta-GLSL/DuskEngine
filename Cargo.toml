@@ -15,6 +15,7 @@ gltf = { version = "1.4", default-features = false, features = ["utils", "extras
 image = { version = "0.25", default-features = false, features = ["png", "hdr"] }
 anyhow = "1.0"
 half = "2"
+image_dds = { version = "0.7.2", default-features = false, features = ["ddsfile", "image"] }
 
 [patch.crates-io]
 gltf = { path = "vendor/gltf" }

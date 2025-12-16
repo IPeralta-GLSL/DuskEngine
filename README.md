@@ -11,16 +11,27 @@ cargo run --release
 
 Controles:
 
-- Click izquierdo: captura el mouse
-- Mouse: mirar
-- `WASD`: mover
-- `Space`: subir
-- `Shift`: bajar
-- `Ctrl`: sprint
+
+## Converting FBX (FBX2glTF)
+
+This engine loads `.gltf` / `.glb` (not `.fbx`).
+
+If you have an FBX (example: `assets/models/environment/SunTemple/SunTemple.fbx`), convert it first using `FBX2glTF` and then load the resulting `.gltf`/`.glb`.
+
+```bash
+# 1) Get FBX2glTF (build or download from: https://github.com/facebookincubator/FBX2glTF)
+#    If you drop the binary into ./tools/, the script will auto-detect it.
+#    Example filename supported: tools/FBX2glTF-linux-x64
+# 2) Convert FBX -> GLB (recommended)
+chmod +x tools/convert_fbx2gltf.sh
+chmod +x tools/FBX2glTF-linux-x64 || true
+tools/convert_fbx2gltf.sh assets/models/environment/SunTemple/SunTemple.fbx assets/models/environment/SunTemple/converted --glb
+
+# 3) Run the engine
+cargo run --release -- assets/models/environment/SunTemple/converted/SunTemple.glb
+```
 
 Por defecto carga:
-
-`assets/models/environment/IntelSponza/NewSponza_Main_glTF_003.gltf`
 
 Para cargar otro modelo:
 

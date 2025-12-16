@@ -92,15 +92,16 @@ fn shadow_pcf(light_clip: vec4<f32>, depth_bias: f32) -> f32 {
         return 1.0;
     }
     let depth = ndc.z;
+    // Smaller kernel reduces shadow bleeding/light leaks through thin geometry.
     let texel = 1.0 / vec2<f32>(2048.0, 2048.0);
     var sum = 0.0;
-    for (var y: i32 = -2; y <= 2; y = y + 1) {
-        for (var x: i32 = -2; x <= 2; x = x + 1) {
+    for (var y: i32 = -1; y <= 1; y = y + 1) {
+        for (var x: i32 = -1; x <= 1; x = x + 1) {
             let o = vec2<f32>(f32(x), f32(y)) * texel;
             sum = sum + textureSampleCompare(shadow_map, shadow_sampler, uv + o, depth - depth_bias);
         }
     }
-    return sum / 25.0;
+    return sum / 9.0;
 }
 
 fn distribution_ggx(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
@@ -159,7 +160,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let V = normalize(camera.position.xyz - in.world_position);
 
     let ndotl = max(dot(N, normalize(-camera.light_dir.xyz)), 0.0);
-    let bias = max(0.00035, 0.0025 * (1.0 - ndotl));
+    // Conservative receiver bias to reduce light leaking/peter-panning.
+    let bias = max(0.00008, 0.0012 * (1.0 - ndotl));
     let shadow = shadow_pcf(in.light_clip, bias);
     
     var F0 = vec3<f32>(0.04);

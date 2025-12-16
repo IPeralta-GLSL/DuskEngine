@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use cgmath::{InnerSpace, Matrix, Matrix3, Matrix4, SquareMatrix, Vector3, Vector4};
+use std::io::Cursor;
 use std::{fs, path::Path};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -54,6 +55,15 @@ pub struct Model {
 impl Model {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
+
+        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+            if ext.eq_ignore_ascii_case("fbx") {
+                anyhow::bail!(
+                    "FBX is not supported natively. Convert it to glTF/GLB first (e.g. with Blender export or 'FBX2glTF'), then load the .gltf/.glb file: {}",
+                    path.display()
+                );
+            }
+        }
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
         let gltf = match path.extension().and_then(|s| s.to_str()) {
@@ -89,33 +99,62 @@ impl Model {
                 candidate = candidate.replace("%20", " ");
             }
 
-            let direct = base_dir.join(&candidate);
-            if let Ok(bytes) = fs::read(&direct) {
-                return Some(bytes);
+            let parent_dir = base_dir.parent();
+            let mut roots: Vec<&Path> = vec![base_dir];
+            if let Some(p) = parent_dir {
+                roots.push(p);
             }
 
+            // 1) Try the full URI path relative to common roots.
+            for root in &roots {
+                let direct = root.join(&candidate);
+                if let Ok(bytes) = fs::read(&direct) {
+                    return Some(bytes);
+                }
+            }
+
+            // 2) Try common texture folders (both casing variants), with full URI.
+            for root in &roots {
+                for folder in ["textures", "Textures"] {
+                    let direct = root.join(folder).join(&candidate);
+                    if let Ok(bytes) = fs::read(&direct) {
+                        return Some(bytes);
+                    }
+                }
+            }
+
+            // 3) Fall back to filename-only search inside common texture folders.
             let file_name = Path::new(&candidate).file_name()?.to_string_lossy().to_string();
-            let textures_dir = base_dir.join("textures");
-            let in_textures = textures_dir.join(&file_name);
-            if let Ok(bytes) = fs::read(&in_textures) {
-                return Some(bytes);
+            for root in &roots {
+                for folder in ["textures", "Textures"] {
+                    let direct = root.join(folder).join(&file_name);
+                    if let Ok(bytes) = fs::read(&direct) {
+                        return Some(bytes);
+                    }
+                }
             }
 
             let file_name_lower = file_name.to_ascii_lowercase();
-            for dir in [base_dir, textures_dir.as_path()] {
-                if let Ok(entries) = fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if !path.is_file() {
-                            continue;
-                        }
-                        let name = match path.file_name().and_then(|s| s.to_str()) {
-                            Some(s) => s,
-                            None => continue,
-                        };
-                        if name.to_ascii_lowercase() == file_name_lower {
-                            if let Ok(bytes) = fs::read(&path) {
-                                return Some(bytes);
+            for root in &roots {
+                for dir in [
+                    root.to_path_buf(),
+                    root.join("textures"),
+                    root.join("Textures"),
+                ] {
+                    if let Ok(entries) = fs::read_dir(&dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if !path.is_file() {
+                                continue;
+                            }
+                            let name = match path.file_name().and_then(|s| s.to_str()) {
+                                Some(s) => s,
+                                None => continue,
+                            };
+                            if name.to_ascii_lowercase() == file_name_lower {
+                                if let Ok(bytes) = fs::read(&path) {
+                                    return Some(bytes);
+                                }
                             }
                         }
                     }
@@ -140,11 +179,28 @@ impl Model {
             };
 
             let (data, width, height) = if let Some(bytes) = bytes_opt {
-                if let Ok(img) = image::load_from_memory(&bytes) {
+                let is_dds = bytes.len() >= 4 && &bytes[0..4] == b"DDS ";
+
+                if is_dds {
+                    let mut cur = Cursor::new(&bytes);
+                    if let Ok(dds) = image_dds::ddsfile::Dds::read(&mut cur) {
+                        if let Ok(img) = image_dds::image_from_dds(&dds, 0) {
+                            let (w, h) = img.dimensions();
+                            (img.into_raw(), w, h)
+                        } else {
+                            log::warn!("Failed to decode DDS image (mip0). Using fallback 1x1 white.");
+                            (vec![255u8, 255, 255, 255], 1, 1)
+                        }
+                    } else {
+                        log::warn!("Failed to parse DDS header. Using fallback 1x1 white.");
+                        (vec![255u8, 255, 255, 255], 1, 1)
+                    }
+                } else if let Ok(img) = image::load_from_memory(&bytes) {
                     let rgba = img.to_rgba8();
                     let (w, h) = rgba.dimensions();
                     (rgba.into_raw(), w, h)
                 } else {
+                    log::warn!("Failed to decode image bytes (non-DDS). Using fallback 1x1 white.");
                     (vec![255u8, 255, 255, 255], 1, 1)
                 }
             } else {

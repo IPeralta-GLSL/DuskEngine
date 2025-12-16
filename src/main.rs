@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use wgpu::util::DeviceExt;
 use winit::{
     event::*,
@@ -21,6 +22,42 @@ use model::{Model, Vertex};
 use std::time::Instant;
 use cgmath::InnerSpace;
 use half::f16;
+
+fn pick_env_hdr_path(model_paths: &[String]) -> Option<PathBuf> {
+    fn score(name: &str) -> i32 {
+        let n = name.to_ascii_lowercase();
+        if n.contains("skybox") {
+            300
+        } else if n.contains("reflection") && n.contains("interior") {
+            250
+        } else if n.contains("reflection") {
+            200
+        } else {
+            100
+        }
+    }
+
+    let mut best: Option<(i32, PathBuf)> = None;
+    for p in model_paths {
+        let path = Path::new(p);
+        let dirs = [path.parent(), path.parent().and_then(|d| d.parent())];
+        for dir in dirs.into_iter().flatten() {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let ep = entry.path();
+                    if ep.extension().and_then(|s| s.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("hdr")) {
+                        let name = ep.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                        let s = score(name);
+                        if best.as_ref().is_none_or(|(bs, _)| s > *bs) {
+                            best = Some((s, ep));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
 
 fn opengl_to_wgpu_matrix() -> cgmath::Matrix4<f32> {
     cgmath::Matrix4::new(
@@ -276,7 +313,8 @@ impl State {
         
         let mut camera_uniform = CameraUniform::new();
 
-        let light_dir = Vector3::new(0.35f32, -1.0f32, 0.25f32).normalize();
+        // Midday sun: straight down.
+        let light_dir = Vector3::new(0.0f32, -1.0f32, 0.0f32);
         let light_view_proj = compute_light_view_proj(light_dir, scene_min, scene_max);
 
         camera_uniform.update(&camera, light_view_proj, light_dir, 0.18);
@@ -378,8 +416,9 @@ impl State {
         });
 
         let (env_texture, env_texture_view, env_sampler) = {
-            let hdr_path = "assets/models/environment/IntelSponza/textures/kloppenheim_05_4k.hdr";
-            let bytes = std::fs::read(hdr_path).unwrap_or_default();
+            let fallback_hdr = PathBuf::from("assets/models/environment/IntelSponza/textures/kloppenheim_05_4k.hdr");
+            let hdr_path = pick_env_hdr_path(&model_paths).unwrap_or(fallback_hdr);
+            let bytes = std::fs::read(&hdr_path).unwrap_or_default();
             let mut width = 1u32;
             let mut height = 1u32;
             let mut rgba16: Vec<u16> = vec![f16::from_f32(0.0).to_bits(), f16::from_f32(0.0).to_bits(), f16::from_f32(0.0).to_bits(), f16::from_f32(1.0).to_bits()];
@@ -709,7 +748,8 @@ impl State {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                // Cast shadows from both sides to avoid light leaking through single-sided meshes.
+                cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -720,8 +760,9 @@ impl State {
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
+                    // Keep raster depth bias conservative; most bias is handled per-fragment.
+                    constant: 1,
+                    slope_scale: 1.0,
                     clamp: 0.0,
                 },
             }),
