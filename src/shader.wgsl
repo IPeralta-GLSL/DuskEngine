@@ -91,6 +91,34 @@ fn select_cascade(view_depth: f32) -> i32 {
     return 3;
 }
 
+struct CascadeBlend {
+    c0: i32,
+    c1: i32,
+    t: f32,
+};
+
+fn cascade_blend(d: f32) -> CascadeBlend {
+    let s0 = camera.cascade_splits.x;
+    let s1 = camera.cascade_splits.y;
+    let s2 = camera.cascade_splits.z;
+
+    let w0 = max(1.0, 0.1 * s0);
+    let w1 = max(1.0, 0.1 * (s1 - s0));
+    let w2 = max(1.0, 0.1 * (s2 - s1));
+
+    if d < s0 {
+        let t = smoothstep(s0 - w0, s0, d);
+        return CascadeBlend(0, 1, t);
+    } else if d < s1 {
+        let t = smoothstep(s1 - w1, s1, d);
+        return CascadeBlend(1, 2, t);
+    } else if d < s2 {
+        let t = smoothstep(s2 - w2, s2, d);
+        return CascadeBlend(2, 3, t);
+    }
+    return CascadeBlend(3, 3, 0.0);
+}
+
 fn get_light_view_proj(cascade: i32) -> mat4x4<f32> {
     if cascade == 0 {
         return camera.light_view_proj;
@@ -160,8 +188,7 @@ fn vs_main(
     out.tex_coords = tex_coords;
     let clip_pos = camera.view_proj * vec4<f32>(position, 1.0);
     out.clip_position = clip_pos;
-    let forward_ws = normalize((camera.view_inv * vec4<f32>(0.0, 0.0, -1.0, 0.0)).xyz);
-    out.view_depth = max(0.0, dot(position - camera.position.xyz, forward_ws));
+    out.view_depth = distance(position, camera.position.xyz);
     return out;
 }
 
@@ -257,8 +284,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let V = normalize(camera.position.xyz - in.world_position);
     let L = normalize(-camera.light_dir.xyz);
 
-    let cascade = select_cascade(in.view_depth);
-    let shadow = shadow_pcf_cascade(in.world_position, N, L, cascade);
+    let cb = cascade_blend(in.view_depth);
+    let s0 = shadow_pcf_cascade(in.world_position, N, L, cb.c0);
+    let s1 = shadow_pcf_cascade(in.world_position, N, L, cb.c1);
+    let shadow = s0 * (1.0 - cb.t) + s1 * cb.t;
     
     var F0 = vec3<f32>(0.04);
     F0 = mix(F0, albedo, metallic);

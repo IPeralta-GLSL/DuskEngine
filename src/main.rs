@@ -139,13 +139,25 @@ fn compute_light_view_proj(light_dir: Vector3<f32>, scene_min: Point3<f32>, scen
 
 fn compute_cascade_view_proj(
     light_dir: Vector3<f32>,
-    camera: &Camera,
-    near: f32,
-    far: f32,
+    _camera: &Camera,
+    _near: f32,
+    _far: f32,
     scene_min: Point3<f32>,
     scene_max: Point3<f32>,
 ) -> cgmath::Matrix4<f32> {
     use cgmath::Matrix4;
+
+    let scene_center = Point3::new(
+        (scene_min.x + scene_max.x) * 0.5,
+        (scene_min.y + scene_max.y) * 0.5,
+        (scene_min.z + scene_max.z) * 0.5,
+    );
+    let extent = Vector3::new(
+        scene_max.x - scene_min.x,
+        scene_max.y - scene_min.y,
+        scene_max.z - scene_min.z,
+    );
+    let scene_radius = extent.magnitude() * 0.5;
 
     let up_l = if light_dir.y.abs() > 0.95 {
         Vector3::new(0.0, 0.0, 1.0)
@@ -153,39 +165,10 @@ fn compute_cascade_view_proj(
         Vector3::new(0.0, 1.0, 0.0)
     };
 
-    let forward = camera.forward();
-    let center = camera.position + forward * ((near + far) * 0.5);
-    let center = Point3::new(center.x, center.y, center.z);
+    let light_pos = scene_center - light_dir * (scene_radius * 2.0 + 50.0);
+    let light_view = Matrix4::look_at_rh(light_pos, scene_center, up_l);
 
-    let tan_half_v = (camera.fovy.to_radians() * 0.5).tan();
-    let tan_half_h = tan_half_v * camera.aspect;
-
-    let far_half_h = far * tan_half_h;
-    let far_half_v = far * tan_half_v;
-    let near_half_h = near * tan_half_h;
-    let near_half_v = near * tan_half_v;
-
-    let far_radius = (far * far + far_half_h * far_half_h + far_half_v * far_half_v).sqrt();
-    let near_radius = (near * near + near_half_h * near_half_h + near_half_v * near_half_v).sqrt();
-    let mut radius = far_radius.max(near_radius);
-
-    let shadow_res = 4096.0;
-    let texel = (2.0 * radius) / shadow_res;
-    radius = (radius / texel).ceil() * texel;
-
-    let light_pos = center - light_dir * (radius * 4.0 + 200.0);
-    let light_view = Matrix4::look_at_rh(light_pos, center, up_l);
-
-    let center_ls = light_view * cgmath::Vector4::new(center.x, center.y, center.z, 1.0);
-    let snapped_x = (center_ls.x / texel).round() * texel;
-    let snapped_y = (center_ls.y / texel).round() * texel;
-
-    let min_x = snapped_x - radius;
-    let max_x = snapped_x + radius;
-    let min_y = snapped_y - radius;
-    let max_y = snapped_y + radius;
-
-    let scene_corners = [
+    let corners = [
         Point3::new(scene_min.x, scene_min.y, scene_min.z),
         Point3::new(scene_min.x, scene_min.y, scene_max.z),
         Point3::new(scene_min.x, scene_max.y, scene_min.z),
@@ -196,18 +179,27 @@ fn compute_cascade_view_proj(
         Point3::new(scene_max.x, scene_max.y, scene_max.z),
     ];
 
-    let mut min_z = f32::INFINITY;
-    let mut max_z = f32::NEG_INFINITY;
-    for p in &scene_corners {
+    let mut min_ls = Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let mut max_ls = Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for p in &corners {
         let lp = light_view * cgmath::Vector4::new(p.x, p.y, p.z, 1.0);
-        min_z = min_z.min(lp.z);
-        max_z = max_z.max(lp.z);
+        min_ls.x = min_ls.x.min(lp.x);
+        min_ls.y = min_ls.y.min(lp.y);
+        min_ls.z = min_ls.z.min(lp.z);
+        max_ls.x = max_ls.x.max(lp.x);
+        max_ls.y = max_ls.y.max(lp.y);
+        max_ls.z = max_ls.z.max(lp.z);
     }
-    let margin_z = radius * 2.0 + 200.0;
-    min_z -= margin_z;
-    max_z += margin_z;
 
-    let light_proj = cgmath::ortho(min_x, max_x, min_y, max_y, -max_z, -min_z);
+    let half_x = (max_ls.x - min_ls.x) * 0.5 * 1.05;
+    let half_y = (max_ls.y - min_ls.y) * 0.5 * 1.05;
+    let half_size = half_x.max(half_y);
+
+    let margin = 50.0;
+    let near_z = (-max_ls.z - margin).max(0.1);
+    let far_z = -min_ls.z + margin;
+
+    let light_proj = cgmath::ortho(-half_size, half_size, -half_size, half_size, near_z, far_z);
     opengl_to_wgpu_matrix() * light_proj * light_view
 }
 
