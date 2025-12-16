@@ -1,5 +1,14 @@
 use cgmath::{InnerSpace, Matrix4, Point3, Vector3};
 
+fn opengl_to_wgpu_matrix() -> Matrix4<f32> {
+    Matrix4::new(
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 0.5, 0.0,
+        0.0, 0.0, 0.5, 1.0,
+    )
+}
+
 pub struct Camera {
     pub position: Point3<f32>,
     pub target: Point3<f32>,
@@ -93,6 +102,9 @@ pub struct CameraUniform {
     pub view_inv: [[f32; 4]; 4],
     pub proj_inv: [[f32; 4]; 4],
     pub position: [f32; 4],
+    pub light_view_proj: [[f32; 4]; 4],
+    pub light_dir: [f32; 4],
+    pub env_intensity: [f32; 4],
 }
 
 impl CameraUniform {
@@ -102,19 +114,26 @@ impl CameraUniform {
             view_inv: Matrix4::from_scale(1.0).into(),
             proj_inv: Matrix4::from_scale(1.0).into(),
             position: [0.0, 0.0, 0.0, 1.0],
+            light_view_proj: Matrix4::from_scale(1.0).into(),
+            light_dir: [0.0, -1.0, 0.0, 0.0],
+            env_intensity: [0.15, 0.15, 0.15, 0.0],
         }
     }
-    
-    pub fn update(&mut self, camera: &Camera) {
+
+    pub fn update(&mut self, camera: &Camera, light_view_proj: Matrix4<f32>, light_dir: Vector3<f32>, env_intensity: f32) {
         use cgmath::SquareMatrix;
         
         let view = camera.view_matrix();
         let proj = camera.projection_matrix();
-        let view_proj = proj * view;
+        let view_proj = opengl_to_wgpu_matrix() * proj * view;
+        let proj_wgpu = opengl_to_wgpu_matrix() * proj;
         
         self.view_proj = view_proj.into();
         self.view_inv = view.invert().unwrap().into();
-        self.proj_inv = proj.invert().unwrap().into();
+        self.proj_inv = proj_wgpu.invert().unwrap().into();
         self.position = [camera.position.x, camera.position.y, camera.position.z, 1.0];
+        self.light_view_proj = light_view_proj.into();
+        self.light_dir = [light_dir.x, light_dir.y, light_dir.z, 0.0];
+        self.env_intensity = [env_intensity, env_intensity, env_intensity, 0.0];
     }
 }

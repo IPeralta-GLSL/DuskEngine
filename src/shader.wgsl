@@ -3,6 +3,7 @@ struct VertexOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) tex_coords: vec2<f32>,
+    @location(3) light_clip: vec4<f32>,
 };
 
 struct CameraUniform {
@@ -10,6 +11,9 @@ struct CameraUniform {
     view_inv: mat4x4<f32>,
     proj_inv: mat4x4<f32>,
     position: vec4<f32>,
+    light_view_proj: mat4x4<f32>,
+    light_dir: vec4<f32>,
+    env_intensity: vec4<f32>,
 };
 
 struct Material {
@@ -20,6 +24,18 @@ struct Material {
 
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
+
+@group(0) @binding(1)
+var shadow_map: texture_depth_2d;
+
+@group(0) @binding(2)
+var shadow_sampler: sampler_comparison;
+
+@group(0) @binding(3)
+var env_map: texture_2d<f32>;
+
+@group(0) @binding(4)
+var env_sampler: sampler;
 
 @group(1) @binding(0)
 var<uniform> material: Material;
@@ -46,7 +62,45 @@ fn vs_main(
     out.normal = normal;
     out.tex_coords = tex_coords;
     out.clip_position = camera.view_proj * vec4<f32>(position, 1.0);
+    out.light_clip = camera.light_view_proj * vec4<f32>(position, 1.0);
     return out;
+}
+
+@vertex
+fn vs_shadow(
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) tex_coords: vec2<f32>,
+) -> @builtin(position) vec4<f32> {
+    return camera.light_view_proj * vec4<f32>(position, 1.0);
+}
+
+fn dir_to_equirect_uv(dir: vec3<f32>) -> vec2<f32> {
+    let d = normalize(dir);
+    let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5;
+    let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+    return vec2<f32>(u, v);
+}
+
+fn shadow_pcf(light_clip: vec4<f32>, depth_bias: f32) -> f32 {
+    if light_clip.w <= 0.0 {
+        return 1.0;
+    }
+    let ndc = light_clip.xyz / light_clip.w;
+    let uv = ndc.xy * 0.5 + vec2<f32>(0.5, 0.5);
+    if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+        return 1.0;
+    }
+    let depth = ndc.z;
+    let texel = 1.0 / vec2<f32>(2048.0, 2048.0);
+    var sum = 0.0;
+    for (var y: i32 = -2; y <= 2; y = y + 1) {
+        for (var x: i32 = -2; x <= 2; x = x + 1) {
+            let o = vec2<f32>(f32(x), f32(y)) * texel;
+            sum = sum + textureSampleCompare(shadow_map, shadow_sampler, uv + o, depth - depth_bias);
+        }
+    }
+    return sum / 25.0;
 }
 
 fn distribution_ggx(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
@@ -103,109 +157,38 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     let N = normalize(in.normal);
     let V = normalize(camera.position.xyz - in.world_position);
+
+    let ndotl = max(dot(N, normalize(-camera.light_dir.xyz)), 0.0);
+    let bias = max(0.00035, 0.0025 * (1.0 - ndotl));
+    let shadow = shadow_pcf(in.light_clip, bias);
     
     var F0 = vec3<f32>(0.04);
     F0 = mix(F0, albedo, metallic);
     
     var Lo = vec3<f32>(0.0);
 
-    let light_color = vec3<f32>(300.0, 300.0, 300.0);
+    let L = normalize(-camera.light_dir.xyz);
+    let H = normalize(V + L);
+    let radiance = vec3<f32>(6.0, 6.0, 6.0);
 
-    let lp0 = vec3<f32>(10.0, 10.0, 10.0);
-    let lp1 = vec3<f32>(-10.0, 10.0, 10.0);
-    let lp2 = vec3<f32>(10.0, 10.0, -10.0);
-    let lp3 = vec3<f32>(-10.0, 10.0, -10.0);
+    let NDF = distribution_ggx(N, H, roughness);
+    let G = geometry_smith(N, V, L, roughness);
+    let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
 
-    {
-        let L = normalize(lp0 - in.world_position);
-        let H = normalize(V + L);
-        let distance = length(lp0 - in.world_position);
-        let attenuation = 1.0 / (distance * distance);
-        let radiance = light_color * attenuation;
+    let kS = F;
+    var kD = vec3<f32>(1.0) - kS;
+    kD = kD * (1.0 - metallic);
 
-        let NDF = distribution_ggx(N, H, roughness);
-        let G = geometry_smith(N, V, L, roughness);
-        let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
+    let numerator = NDF * G * F;
+    let denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+    let specular = numerator / denominator;
 
-        let kS = F;
-        var kD = vec3<f32>(1.0) - kS;
-        kD = kD * (1.0 - metallic);
-
-        let numerator = NDF * G * F;
-        let denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-        let specular = numerator / denominator;
-
-        let NdotL = max(dot(N, L), 0.0);
-        Lo = Lo + (kD * albedo / PI + specular) * radiance * NdotL;
-    }
-    {
-        let L = normalize(lp1 - in.world_position);
-        let H = normalize(V + L);
-        let distance = length(lp1 - in.world_position);
-        let attenuation = 1.0 / (distance * distance);
-        let radiance = light_color * attenuation;
-
-        let NDF = distribution_ggx(N, H, roughness);
-        let G = geometry_smith(N, V, L, roughness);
-        let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
-
-        let kS = F;
-        var kD = vec3<f32>(1.0) - kS;
-        kD = kD * (1.0 - metallic);
-
-        let numerator = NDF * G * F;
-        let denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-        let specular = numerator / denominator;
-
-        let NdotL = max(dot(N, L), 0.0);
-        Lo = Lo + (kD * albedo / PI + specular) * radiance * NdotL;
-    }
-    {
-        let L = normalize(lp2 - in.world_position);
-        let H = normalize(V + L);
-        let distance = length(lp2 - in.world_position);
-        let attenuation = 1.0 / (distance * distance);
-        let radiance = light_color * attenuation;
-
-        let NDF = distribution_ggx(N, H, roughness);
-        let G = geometry_smith(N, V, L, roughness);
-        let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
-
-        let kS = F;
-        var kD = vec3<f32>(1.0) - kS;
-        kD = kD * (1.0 - metallic);
-
-        let numerator = NDF * G * F;
-        let denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-        let specular = numerator / denominator;
-
-        let NdotL = max(dot(N, L), 0.0);
-        Lo = Lo + (kD * albedo / PI + specular) * radiance * NdotL;
-    }
-    {
-        let L = normalize(lp3 - in.world_position);
-        let H = normalize(V + L);
-        let distance = length(lp3 - in.world_position);
-        let attenuation = 1.0 / (distance * distance);
-        let radiance = light_color * attenuation;
-
-        let NDF = distribution_ggx(N, H, roughness);
-        let G = geometry_smith(N, V, L, roughness);
-        let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
-
-        let kS = F;
-        var kD = vec3<f32>(1.0) - kS;
-        kD = kD * (1.0 - metallic);
-
-        let numerator = NDF * G * F;
-        let denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-        let specular = numerator / denominator;
-
-        let NdotL = max(dot(N, L), 0.0);
-        Lo = Lo + (kD * albedo / PI + specular) * radiance * NdotL;
-    }
+    let NdotL = max(dot(N, L), 0.0);
+    Lo = (kD * albedo / PI + specular) * radiance * NdotL * shadow;
     
-    let ambient = vec3<f32>(0.03) * albedo;
+    let env_uv = dir_to_equirect_uv(N);
+    let env_col = textureSample(env_map, env_sampler, env_uv).rgb;
+    let ambient = env_col * albedo * camera.env_intensity.rgb;
     var color = ambient + Lo;
     
     color = color / (color + vec3<f32>(1.0));

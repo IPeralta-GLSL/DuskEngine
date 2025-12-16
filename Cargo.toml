@@ -12,8 +12,9 @@ cgmath = "0.18"
 env_logger = "0.11"
 log = "0.4"
 gltf = { version = "1.4", default-features = false, features = ["utils", "extras", "names"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "hdr"] }
 anyhow = "1.0"
+half = "2"
 
 [patch.crates-io]
 gltf = { path = "vendor/gltf" }
