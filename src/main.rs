@@ -10,12 +10,16 @@ use winit::{
 use cgmath::{Point3, Vector3};
 
 mod camera;
+mod controller;
 mod material;
 mod model;
 
 use camera::{Camera, CameraUniform};
+use controller::InputState;
 use material::Material;
 use model::{Model, Vertex};
+use std::time::Instant;
+use cgmath::InnerSpace;
 
 struct State {
     surface: wgpu::Surface<'static>,
@@ -29,6 +33,8 @@ struct State {
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    input: InputState,
+    last_frame: Instant,
     model: Model,
     vertex_buffers: Vec<wgpu::Buffer>,
     index_buffers: Vec<wgpu::Buffer>,
@@ -116,8 +122,10 @@ impl State {
                 let extent = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
                 let radius = ((extent[0] * extent[0] + extent[1] * extent[1] + extent[2] * extent[2]).sqrt()) * 0.5;
                 let target = Point3::new(center[0], center[1], center[2]);
-                camera.target = target;
-                camera.position = target + Vector3::new(0.0, radius * 0.5 + 1.0, radius * 2.0 + 2.0);
+                camera.set_look_at(
+                    target + Vector3::new(0.0, radius * 0.5 + 1.0, radius * 2.0 + 2.0),
+                    target,
+                );
             }
         }
         
@@ -340,6 +348,8 @@ impl State {
             camera_uniform,
             camera_buffer,
             camera_bind_group,
+            input: InputState::new(),
+            last_frame: Instant::now(),
             model,
             vertex_buffers,
             index_buffers,
@@ -377,11 +387,51 @@ impl State {
         }
     }
     
-    fn input(&mut self, _event: &WindowEvent) -> bool {
-        false
+    fn input(&mut self, event: &WindowEvent) -> bool {
+        let used = self.input.on_window_event(event);
+        if self.input.mouse_captured {
+            let _ = self.window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+            self.window.set_cursor_visible(false);
+        }
+        used
     }
     
     fn update(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+        self.last_frame = now;
+
+        let (dx, dy) = self.input.take_mouse_delta();
+        if self.input.mouse_captured {
+            self.camera.apply_mouse_look(dx, dy, 0.002);
+        }
+
+        let mut wish = Vector3::new(0.0, 0.0, 0.0);
+        if self.input.forward {
+            wish += self.camera.forward();
+        }
+        if self.input.back {
+            wish -= self.camera.forward();
+        }
+        if self.input.right {
+            wish += self.camera.right();
+        }
+        if self.input.left {
+            wish -= self.camera.right();
+        }
+        if self.input.up {
+            wish += self.camera.up;
+        }
+        if self.input.down {
+            wish -= self.camera.up;
+        }
+        if wish.magnitude2() > 0.0 {
+            wish = wish.normalize();
+        }
+
+        let speed = if self.input.sprint { 18.0 } else { 6.0 };
+        self.camera.move_fly(wish, dt, speed);
+
         self.camera_uniform.update(&self.camera);
         self.queue.write_buffer(
             &self.camera_buffer,
@@ -463,6 +513,11 @@ fn main() -> Result<()> {
     
     event_loop.run(move |event, elwt| {
         match event {
+            Event::DeviceEvent { event, .. } => {
+                if let DeviceEvent::MouseMotion { delta } = event {
+                    state.input.on_mouse_motion(delta);
+                }
+            }
             Event::WindowEvent {
                 ref event,
                 window_id,

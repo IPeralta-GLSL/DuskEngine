@@ -9,6 +9,15 @@ cd /home/iperalta/Documents/Git/DuskEngine
 cargo run --release
 ```
 
+Controles:
+
+- Click izquierdo: captura el mouse
+- Mouse: mirar
+- `WASD`: mover
+- `Space`: subir
+- `Shift`: bajar
+- `Ctrl`: sprint
+
 Por defecto carga:
 
 `assets/models/environment/IntelSponza/NewSponza_Main_glTF_003.gltf`
